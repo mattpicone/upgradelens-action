@@ -1,0 +1,24 @@
+{
+  "name": "upgradelens-action",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only dependency pull-request review with UpgradeLens",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --banner:js=\"import { createRequire as __createRequire } from 'module';const require=__createRequire(import.meta.url);\"",
+    "test": "vitest run",
+    "check": "npm run test && npm run build && git diff --exit-code -- dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@x402/core": "2.24.0",
+    "@x402/evm": "2.24.0",
+    "@x402/extensions": "2.24.0",
+    "@x402/mcp": "2.24.0",
+    "viem": "2.56.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9",
+    "vitest": "3.2.7"
+  }
+}

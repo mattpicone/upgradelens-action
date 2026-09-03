@@ -1,0 +1,20 @@
+name: UpgradeLens dependency review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mattpicone/upgradelens-action@v0
+        with:
+          max-spend-usd: "0.03"
+        env:
+          # Optional. For Dependabot PRs, configure this as a Dependabot secret.
+          UPGRADELENS_BUYER_PRIVATE_KEY: ${{ secrets.UPGRADELENS_BUYER_PRIVATE_KEY }}

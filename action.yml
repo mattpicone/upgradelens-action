@@ -1,0 +1,22 @@
+name: UpgradeLens dependency review
+description: Review up to three direct npm or PyPI dependency upgrades without uploading repository source.
+author: Matt Picone
+branding:
+  icon: search
+  color: purple
+inputs:
+  service-url:
+    description: UpgradeLens service origin
+    required: false
+    default: https://upgradelens.mattpicone.workers.dev
+  max-spend-usd:
+    description: Maximum total x402 payment allowed during this run
+    required: false
+    default: "0.03"
+  max-changes:
+    description: Maximum number of direct dependency changes to review (hard-capped at three)
+    required: false
+    default: "3"
+runs:
+  using: node20
+  main: dist/index.js
