@@ -74618,6 +74618,12 @@ function add(map, ecosystem, name, version5, direct = false) {
   if (!name || !normalized) return;
   map.set(`${ecosystem}:${name.toLowerCase()}`, { ecosystem, package: name, version: normalized, direct });
 }
+function markDirect(map, ecosystem, name) {
+  if (!name) return;
+  const key = `${ecosystem}:${name.toLowerCase()}`;
+  const current = map.get(key);
+  map.set(key, current ? { ...current, direct: true } : { ecosystem, package: name, version: null, direct: true });
+}
 function parsePackageJson(text, map) {
   let json;
   try {
@@ -74626,7 +74632,10 @@ function parsePackageJson(text, map) {
     return;
   }
   for (const section of ["dependencies", "optionalDependencies", "peerDependencies"]) {
-    for (const [name, version5] of Object.entries(json?.[section] || {})) add(map, "npm", name, version5, true);
+    for (const [name, version5] of Object.entries(json?.[section] || {})) {
+      markDirect(map, "npm", name);
+      add(map, "npm", name, version5, true);
+    }
   }
 }
 function parsePackageLock(text, map) {
@@ -74644,19 +74653,27 @@ function parsePackageLock(text, map) {
 }
 function parsePnpmLock(text, map) {
   const lines = text.split(/\r?\n/);
-  let inRootImporter = false;
+  let inImporters = false;
+  let inImporter = false;
   let inDirectSection = false;
   let current = null;
   for (const line of lines) {
     const indent = line.match(/^\s*/)?.[0].length ?? 0;
-    if (/^importers:\s*$/.test(line)) continue;
-    if (/^\s{2}['"]?\.['"]?:\s*$/.test(line)) {
-      inRootImporter = true;
+    if (/^importers:\s*$/.test(line)) {
+      inImporters = true;
+      inImporter = false;
+      continue;
+    }
+    if (inImporters && indent === 0 && line.trim()) {
+      inImporters = false;
+      inImporter = false;
+    }
+    if (inImporters && indent === 2 && /^\s{2}.+:\s*$/.test(line)) {
+      inImporter = true;
       inDirectSection = false;
       continue;
     }
-    if (inRootImporter && indent === 2 && !/^\s{2}['"]?\.['"]?:/.test(line)) inRootImporter = false;
-    if (!inRootImporter) continue;
+    if (!inImporter) continue;
     if (/^\s{4}(dependencies|optionalDependencies|devDependencies):\s*$/.test(line)) {
       inDirectSection = !line.includes("devDependencies");
       current = null;
@@ -74681,7 +74698,7 @@ function parseYarnLock(text, map, directNames2) {
       selectors = line.slice(0, -1).split(",").map((value) => value.trim());
       continue;
     }
-    const version5 = line.match(/^\s{2}version\s+["']([^"']+)["']/);
+    const version5 = line.match(/^\s{2}version(?::|\s+)\s*["']?([^"'\s]+)["']?/);
     if (!version5) continue;
     for (const selector of selectors) {
       const name = packageNameFromLockSelector(selector);
@@ -74704,12 +74721,18 @@ function parsePyproject(text, map) {
       continue;
     }
     if (section === "project") {
-      const match = line.match(/["']([A-Za-z0-9_.-]+)\s*==\s*([^"';\s]+)/);
-      if (match) add(map, "pypi", match[1], match[2], true);
+      for (const dependency of line.matchAll(/["']([A-Za-z0-9_.-]+)\s*([^"']*)["']/g)) {
+        markDirect(map, "pypi", dependency[1]);
+        const pinned = dependency[2].match(/^\s*==\s*([^;\s]+)/);
+        if (pinned) add(map, "pypi", dependency[1], pinned[1], true);
+      }
     }
     if (/^tool\.poetry\.(dependencies|group\.[^.]+\.dependencies)$/.test(section)) {
       const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*["']([^"']+)["']/);
-      if (match && match[1].toLowerCase() !== "python") add(map, "pypi", match[1], match[2], true);
+      if (match && match[1].toLowerCase() !== "python") {
+        markDirect(map, "pypi", match[1]);
+        add(map, "pypi", match[1], match[2], true);
+      }
     }
   }
 }
@@ -74760,7 +74783,7 @@ function detectDependencyChanges(files) {
   const changes = [];
   for (const [key, target] of after) {
     const current = before.get(key);
-    if (!current || !target.direct || current.version === target.version) continue;
+    if (!current || !target.direct || !current.version || !target.version || current.version === target.version) continue;
     changes.push({
       ecosystem: target.ecosystem,
       package: target.package,
