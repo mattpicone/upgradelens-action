@@ -2,6 +2,18 @@ import { describe, expect, it } from "vitest";
 import { detectDependencyChanges, prioritizeChanges } from "../src/extract.js";
 
 describe("direct dependency extraction", () => {
+  it("resolves direct npm development tools without including their transitive dependencies", () => {
+    const lock = (version) => JSON.stringify({ packages: { "": { devDependencies: { vite: "^" + version } }, "node_modules/vite": { version }, "node_modules/transitive": { version } } });
+    expect(detectDependencyChanges([{ path: "package-lock.json", before: lock("6.1.0"), after: lock("7.0.0") }]))
+      .toEqual([{ ecosystem: "npm", package: "vite", current_version: "6.1.0", target_version: "7.0.0" }]);
+  });
+
+  it("resolves direct pnpm development tools", () => {
+    const lock = (version) => `importers:\n  .:\n    devDependencies:\n      vite:\n        specifier: ^${version}\n        version: ${version}\n`;
+    expect(detectDependencyChanges([{ path: "pnpm-lock.yaml", before: lock("6.1.0"), after: lock("7.0.0") }]))
+      .toEqual([{ ecosystem: "npm", package: "vite", current_version: "6.1.0", target_version: "7.0.0" }]);
+  });
+
   it("resolves direct npm changes from package-lock and ignores transitive packages", () => {
     const files = [{
       path: "package-lock.json",

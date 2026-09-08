@@ -31,7 +31,7 @@ function markDirect(map, ecosystem, name) {
 function parsePackageJson(text, map) {
   let json;
   try { json = JSON.parse(text); } catch { return; }
-  for (const section of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+  for (const section of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
     for (const [name, version] of Object.entries(json?.[section] || {})) {
       markDirect(map, "npm", name);
       add(map, "npm", name, version, true);
@@ -42,7 +42,10 @@ function parsePackageJson(text, map) {
 function parsePackageLock(text, map) {
   let json;
   try { json = JSON.parse(text); } catch { return; }
-  const direct = new Set(Object.keys(json?.packages?.[""]?.dependencies || json?.dependencies || {}));
+  const root = json?.packages?.[""];
+  const direct = new Set(root
+    ? ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].flatMap((section) => Object.keys(root[section] || {}))
+    : Object.keys(json?.dependencies || {}));
   for (const name of direct) {
     const row = json?.packages?.[`node_modules/${name}`] || json?.dependencies?.[name];
     add(map, "npm", name, row?.version, true);
@@ -61,7 +64,7 @@ function parsePnpmLock(text, map) {
     if (inImporters && indent === 0 && line.trim()) { inImporters = false; inImporter = false; }
     if (inImporters && indent === 2 && /^\s{2}.+:\s*$/.test(line)) { inImporter = true; inDirectSection = false; continue; }
     if (!inImporter) continue;
-    if (/^\s{4}(dependencies|optionalDependencies|devDependencies):\s*$/.test(line)) { inDirectSection = !line.includes("devDependencies"); current = null; continue; }
+    if (/^\s{4}(dependencies|optionalDependencies|devDependencies):\s*$/.test(line)) { inDirectSection = true; current = null; continue; }
     if (indent <= 4 && !/^\s*$/.test(line) && !/^\s{4}(dependencies|optionalDependencies|devDependencies):/.test(line)) inDirectSection = false;
     if (!inDirectSection) continue;
     const name = indent === 6 ? line.match(/^\s{6}([^:#][^:]*):\s*(.*)$/) : null;
@@ -183,5 +186,6 @@ export function prioritizeChanges(changes, security, maximum = 3) {
   return [...changes]
     .map((change) => ({ ...change, security: Boolean(security), major: major(change.target_version) > major(change.current_version) }))
     .sort((left, right) => Number(right.security) - Number(left.security) || Number(right.major) - Number(left.major) || left.package.localeCompare(right.package))
-    .slice(0, Math.max(0, Math.min(3, maximum)));
+    .slice(0, Math.max(0, Math.min(3, maximum)))
+    .map(({ security: _security, major: _major, ...change }) => change);
 }

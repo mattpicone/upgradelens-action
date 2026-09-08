@@ -17,6 +17,19 @@ inputs:
     description: Maximum number of direct dependency changes to review (hard-capped at three)
     required: false
     default: "3"
+  node-version:
+    description: Exact Node runtime version to check, for example 22.0.0
+    required: false
+  python-version:
+    description: Exact Python runtime version to check, for example 3.12.0
+    required: false
+outputs:
+  reviewed:
+    description: Number of completed reviews, including evidence-limited unknown decisions
+  blocked:
+    description: Number of explicit block decisions
+  unavailable:
+    description: Number of selected reviews unavailable due to payment or service errors
 runs:
   using: node20
   main: dist/index.js

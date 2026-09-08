@@ -74631,7 +74631,7 @@ function parsePackageJson(text, map) {
   } catch {
     return;
   }
-  for (const section of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+  for (const section of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
     for (const [name, version5] of Object.entries(json?.[section] || {})) {
       markDirect(map, "npm", name);
       add(map, "npm", name, version5, true);
@@ -74645,7 +74645,8 @@ function parsePackageLock(text, map) {
   } catch {
     return;
   }
-  const direct = new Set(Object.keys(json?.packages?.[""]?.dependencies || json?.dependencies || {}));
+  const root = json?.packages?.[""];
+  const direct = new Set(root ? ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].flatMap((section) => Object.keys(root[section] || {})) : Object.keys(json?.dependencies || {}));
   for (const name of direct) {
     const row = json?.packages?.[`node_modules/${name}`] || json?.dependencies?.[name];
     add(map, "npm", name, row?.version, true);
@@ -74675,7 +74676,7 @@ function parsePnpmLock(text, map) {
     }
     if (!inImporter) continue;
     if (/^\s{4}(dependencies|optionalDependencies|devDependencies):\s*$/.test(line)) {
-      inDirectSection = !line.includes("devDependencies");
+      inDirectSection = true;
       current = null;
       continue;
     }
@@ -74797,24 +74798,95 @@ function major(version5) {
   return Number(String(version5).split(".")[0]);
 }
 function prioritizeChanges(changes, security, maximum = 3) {
-  return [...changes].map((change) => ({ ...change, security: Boolean(security), major: major(change.target_version) > major(change.current_version) })).sort((left, right) => Number(right.security) - Number(left.security) || Number(right.major) - Number(left.major) || left.package.localeCompare(right.package)).slice(0, Math.max(0, Math.min(3, maximum)));
+  return [...changes].map((change) => ({ ...change, security: Boolean(security), major: major(change.target_version) > major(change.current_version) })).sort((left, right) => Number(right.security) - Number(left.security) || Number(right.major) - Number(left.major) || left.package.localeCompare(right.package)).slice(0, Math.max(0, Math.min(3, maximum))).map(({ security: _security, major: _major, ...change }) => change);
+}
+
+// src/review.js
+function reviewRequest(change, runtime2 = {}) {
+  return {
+    ecosystem: change.ecosystem,
+    package: change.package,
+    current_version: change.current_version,
+    target_version: change.target_version,
+    ...Object.keys(runtime2).length ? { runtime: runtime2 } : {},
+    detail: "compact"
+  };
+}
+function spendLimit(value) {
+  if (value === void 0 || value === "") return 3e4;
+  if (!/^\d+(?:\.\d{1,6})?$/.test(value)) return 0;
+  const [whole, fraction = ""] = value.split(".");
+  const atomic = BigInt(whole) * 1000000n + BigInt(fraction.padEnd(6, "0"));
+  return Number(atomic > 30000n ? 30000n : atomic);
+}
+function paymentAllowed({ toolName, paymentRequired, service: service2, spentAtomic: spentAtomic2, maxSpendAtomic: maxSpendAtomic2 }) {
+  const accepts = paymentRequired?.accepts;
+  const requirement = Array.isArray(accepts) && accepts.length === 1 ? accepts[0] : null;
+  return service2.startsWith("https://") && toolName === "review_dependency_upgrade" && paymentRequired?.x402Version === 2 && paymentRequired?.extensions?.["payment-identifier"]?.info?.required === true && paymentRequired?.resource?.url === `${service2}/mcp#review_dependency_upgrade` && requirement?.scheme === "exact" && requirement?.network === "eip155:8453" && String(requirement?.asset || "").toLowerCase() === "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" && /^0x[0-9a-fA-F]{40}$/.test(requirement?.payTo || "") && requirement?.amount === "10000" && spentAtomic2 + 1e4 <= maxSpendAtomic2;
+}
+function normalizeReview(result) {
+  if (!result || !["proceed", "review_required", "block", "unknown"].includes(result.decision)) {
+    return { decision: "unknown", note: result?.error?.message || "The service did not return a valid review decision." };
+  }
+  return result;
+}
+function escape2(value) {
+  return String(value ?? "").slice(0, 2e3).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("|", "&#124;").replace(/[\r\n]+/g, " ").replace(/([\\`*_\[\]])/g, "\\$1");
+}
+function sourceLink(citation) {
+  try {
+    const url2 = new URL(citation.source_url);
+    if (url2.protocol !== "https:") return null;
+    return `[${escape2(citation.source_type || "Source")}](${url2.href.replaceAll("(", "%28").replaceAll(")", "%29")})`;
+  } catch {
+    return null;
+  }
+}
+function reviewSummary(results, maxSpendAtomic2, authorizedAtomic) {
+  const rows = results.map(({ change, ...result }) => `| ${escape2(change.package)} | ${escape2(change.current_version)} \u2192 ${escape2(change.target_version)} | ${escape2(result.decision)} | ${escape2(result.risk_score ?? "\u2014")} |`).join("\n");
+  const completed = results.filter((row) => !row.note).length;
+  const detail = results.map((row) => {
+    const actions = (row.migration_actions || []).slice(0, 6).map((action, i) => `${i + 1}. ${escape2(action.action)}`).join("\n");
+    const sources = (row.citations || []).slice(0, 6).map(sourceLink).filter(Boolean).join(" \xB7 ");
+    return `### ${escape2(row.change.package)}
+
+${escape2(row.note || row.headline || row.decision)}
+
+${actions ? `${actions}
+
+` : ""}${sources ? `Evidence: ${sources}
+
+` : ""}`;
+  }).join("");
+  return `## UpgradeLens dependency review
+
+| Package | Upgrade | Decision | Risk |
+|---|---|---|---:|
+${rows}
+
+${detail}Completed ${completed} of ${results.length} selected review(s). Payment authorizations reserved: $${(authorizedAtomic / 1e6).toFixed(2)}; run limit: $${(maxSpendAtomic2 / 1e6).toFixed(2)}. Authorizations are a spending ceiling, not proof of settlement.
+
+Only package names, exact versions, and configured runtimes are sent for analysis.
+`;
 }
 
 // src/index.js
 var dependencyFile = /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|pyproject\.toml|poetry\.lock|uv\.lock|requirements[^/]*\.txt)$/i;
 var service = (process.env["INPUT_SERVICE-URL"] || "https://upgradelens.mattpicone.workers.dev").replace(/\/$/, "");
 var requestedChanges = Number(process.env["INPUT_MAX-CHANGES"] || 3);
-var requestedSpend = Number(process.env["INPUT_MAX-SPEND-USD"] || 0.03);
 var maxChanges = Number.isFinite(requestedChanges) ? Math.min(3, Math.max(1, Math.floor(requestedChanges))) : 3;
-var maxSpendAtomic = Number.isFinite(requestedSpend) ? Math.round(Math.min(0.03, Math.max(0, requestedSpend)) * 1e6) : 3e4;
-var BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+var maxSpendAtomic = spendLimit(process.env["INPUT_MAX-SPEND-USD"]);
+var runtime = Object.fromEntries(["node", "python"].flatMap((key) => {
+  const value = process.env[`INPUT_${key.toUpperCase()}-VERSION`]?.trim();
+  return value ? [[key, value]] : [];
+}));
 function command(name, args) {
   const result = spawnSync(name, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
   if (result.status !== 0) throw new Error(`${name} ${args[0]} failed: ${result.stderr.trim()}`);
   return result.stdout;
 }
 function annotation(level, message) {
-  process.stdout.write(`::${level}::${String(message).replace(/[\r\n]+/g, " ")}
+  process.stdout.write(`::${level}::${String(message).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A")}
 `);
 }
 async function summary(markdown) {
@@ -74852,7 +74924,7 @@ function contentResult(result) {
 var paidClientPromise = null;
 var spentAtomic = 0;
 async function paidReview(change) {
-  if (!process.env.UPGRADELENS_BUYER_PRIVATE_KEY) return null;
+  if (!process.env.UPGRADELENS_BUYER_PRIVATE_KEY || maxSpendAtomic - spentAtomic < 1e4) return null;
   if (!paidClientPromise) paidClientPromise = (async () => {
     const [{ Client: Client2 }, { StreamableHTTPClientTransport: StreamableHTTPClientTransport2 }, { x402MCPClient: x402MCPClient2 }, { x402Client: x402Client2 }, { ExactEvmScheme: ExactEvmScheme2 }, { appendPaymentIdentifierToExtensions: appendPaymentIdentifierToExtensions2 }, { privateKeyToAccount: privateKeyToAccount2 }] = await Promise.all([
       Promise.resolve().then(() => (init_client2(), client_exports)),
@@ -74871,23 +74943,26 @@ async function paidReview(change) {
         extensions: appendPaymentIdentifierToExtensions2(structuredClone(created.extensions || {}))
       })
     });
-    const raw = new Client2({ name: "upgradelens-action", version: "0.1.0" }, { capabilities: {} });
+    const raw = new Client2({ name: "upgradelens-action", version: "0.1.1" }, { capabilities: {} });
     const buyer2 = new x402MCPClient2(raw, payment, {
       autoPayment: true,
       onPaymentRequested: ({ toolName, paymentRequired }) => {
-        const accepts = paymentRequired?.accepts || [];
-        const requirement = accepts.length === 1 ? accepts[0] : null;
-        const amount = Number(requirement?.amount);
-        const allowed = toolName === "review_dependency_upgrade" && requirement?.scheme === "exact" && paymentRequired?.resource?.url === `${service}/mcp#review_dependency_upgrade` && requirement?.network === "eip155:8453" && String(requirement?.asset || "").toLowerCase() === BASE_USDC && /^0x[0-9a-fA-F]{40}$/.test(requirement?.payTo || "") && Number.isSafeInteger(amount) && amount === 1e4 && spentAtomic + amount <= maxSpendAtomic;
-        if (allowed) spentAtomic += amount;
+        const allowed = paymentAllowed({ toolName, paymentRequired, service, spentAtomic, maxSpendAtomic });
+        if (allowed) spentAtomic += 1e4;
         return allowed;
       }
     });
-    await buyer2.connect(new StreamableHTTPClientTransport2(new URL(`${service}/mcp`)));
+    try {
+      await buyer2.connect(new StreamableHTTPClientTransport2(new URL(`${service}/mcp`)));
+    } catch (error2) {
+      await buyer2.close().catch(() => {
+      });
+      throw error2;
+    }
     return buyer2;
   })();
   const buyer = await paidClientPromise;
-  return contentResult(await buyer.callTool("review_dependency_upgrade", { ...change, detail: "compact" }));
+  return normalizeReview(contentResult(await buyer.callTool("review_dependency_upgrade", reviewRequest(change, runtime))));
 }
 async function review(change, entitlement) {
   const response = await fetch(`${service}/v1/upgrade/review`, {
@@ -74897,13 +74972,19 @@ async function review(change, entitlement) {
       accept: "application/json",
       ...entitlement ? { "x-upgradelens-trial-token": entitlement } : {}
     },
-    body: JSON.stringify({ ...change, detail: "compact" }),
+    body: JSON.stringify(reviewRequest(change, runtime)),
     signal: AbortSignal.timeout(3e4)
   });
-  if (response.status === 402) return paidReview(change);
+  if (response.status === 402) {
+    try {
+      return await paidReview(change);
+    } catch {
+      throw new Error("Paid review unavailable. Check wallet configuration, remaining budget, and service payment readiness.");
+    }
+  }
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(`review returned ${response.status}: ${body?.error?.message || "unknown error"}`);
-  return body;
+  return normalizeReview(body);
 }
 async function fileAtRevision(revision, path) {
   try {
@@ -74912,15 +74993,8 @@ async function fileAtRevision(revision, path) {
     return null;
   }
 }
-async function currentFile(path) {
-  try {
-    const value = await readFile(path, "utf8");
-    return value.length <= 2 * 1024 * 1024 ? value : null;
-  } catch {
-    return null;
-  }
-}
 async function main() {
+  if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, "reviewed=0\nblocked=0\nunavailable=0\n");
   const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, "utf8"));
   const base = event.pull_request?.base?.sha;
   const head = event.pull_request?.head?.sha || process.env.GITHUB_SHA;
@@ -74928,7 +75002,8 @@ async function main() {
     await summary("## UpgradeLens\n\nSkipped: this action runs only for pull requests.\n");
     return;
   }
-  const changed = command("git", ["diff", "--name-only", base, head, "--"]).split(/\r?\n/).filter(dependencyFile.test.bind(dependencyFile));
+  if (!/^[a-f0-9]{40,64}$/i.test(base) || !/^[a-f0-9]{40,64}$/i.test(head)) throw new Error("Pull request revisions must be full commit hashes.");
+  const changed = command("git", ["diff", "--name-only", "-z", base, head, "--"]).split("\0").filter(dependencyFile.test.bind(dependencyFile));
   const candidates = new Set(changed);
   for (const path of changed) {
     const folder = dirname(path);
@@ -74936,7 +75011,7 @@ async function main() {
     if (["package-lock.json", "pnpm-lock.yaml", "yarn.lock"].includes(name)) candidates.add(folder === "." ? "package.json" : `${folder}/package.json`);
     if (["poetry.lock", "uv.lock"].includes(name)) candidates.add(folder === "." ? "pyproject.toml" : `${folder}/pyproject.toml`);
   }
-  const files = await Promise.all([...candidates].map(async (path) => ({ path, before: await fileAtRevision(base, path), after: await currentFile(path) })));
+  const files = await Promise.all([...candidates].map(async (path) => ({ path, before: await fileAtRevision(base, path), after: await fileAtRevision(head, path) })));
   const security = /security|vulnerab|\bCVE-/i.test(`${event.pull_request.title || ""} ${event.pull_request.body || ""} ${(event.pull_request.labels || []).map((label) => label.name).join(" ")}`);
   const changes = prioritizeChanges(detectDependencyChanges(files), security, maxChanges);
   if (!changes.length) {
@@ -74954,10 +75029,11 @@ async function main() {
     try {
       const result = await review(change, entitlement);
       if (!result) {
-        results.push({ change, decision: "unknown", note: "Free repository unit unavailable and no compatible wallet was configured." });
-        annotation("warning", `${change.package}: analysis requires payment; configure UPGRADELENS_BUYER_PRIVATE_KEY as an Actions/Dependabot secret.`);
+        const note = "Review unavailable: the free unit is exhausted, and a funded wallet plus at least $0.01 remaining run budget is required for payment.";
+        results.push({ change, decision: "unknown", note });
+        annotation("warning", `${change.package}: ${note}`);
       } else {
-        results.push({ change, ...result });
+        results.push({ ...result, change });
         annotation(result.decision === "block" ? "error" : result.decision === "proceed" ? "notice" : "warning", `${change.package} ${change.current_version} \u2192 ${change.target_version}: ${result.decision}`);
       }
     } catch (error2) {
@@ -74965,20 +75041,20 @@ async function main() {
       annotation("warning", `${change.package}: ${error2.message}`);
     }
   }
-  const rows = results.map((row) => `| ${row.change.package} | ${row.change.current_version} \u2192 ${row.change.target_version} | ${row.decision} | ${row.risk_score ?? "\u2014"} |`).join("\n");
-  await summary(`## UpgradeLens dependency review
-
-| Package | Upgrade | Decision | Risk |
-|---|---|---:|---:|
-${rows}
-
-Analyzed ${results.length} direct change(s); maximum paid spend was $${(maxSpendAtomic / 1e6).toFixed(2)}. Repository contents, tokens, OIDC assertions, and wallet material were not sent as telemetry.
-`);
   if (results.some((row) => row.decision === "block")) process.exitCode = 1;
+  await summary(reviewSummary(results, maxSpendAtomic, spentAtomic));
+  if (process.env.GITHUB_OUTPUT) {
+    const counts = { reviewed: results.filter((row) => !row.note).length, blocked: results.filter((row) => row.decision === "block").length, unavailable: results.filter((row) => row.note).length };
+    await appendFile(process.env.GITHUB_OUTPUT, Object.entries(counts).map(([key, value]) => `${key}=${value}
+`).join(""));
+  }
 }
 main().catch(async (error2) => {
   annotation("warning", error2 instanceof Error ? error2.message : String(error2));
   await summary("## UpgradeLens\n\nAnalysis was unavailable; the workflow remains non-blocking because no explicit `block` decision was returned.\n");
+}).finally(async () => {
+  if (paidClientPromise) await (await paidClientPromise.catch(() => null))?.close().catch(() => {
+  });
 });
 /*! Bundled license information:
 

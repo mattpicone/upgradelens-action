@@ -24,6 +24,9 @@ jobs:
       - uses: mattpicone/upgradelens-action@v0
         with:
           max-spend-usd: "0.03"
+        env:
+          # Optional: needed only for paid reviews after the free unit.
+          UPGRADELENS_BUYER_PRIVATE_KEY: ${{ secrets.UPGRADELENS_BUYER_PRIVATE_KEY }}
 ```
 
 No account or API key is needed. With `id-token: write`, each immutable GitHub repository ID receives one free analysis unit per rolling 30 days. The OIDC assertion is exchanged for a 15-minute repository-bound entitlement and is never added to telemetry.
@@ -34,7 +37,12 @@ For automatic x402 payment after the free unit, configure `UPGRADELENS_BUYER_PRI
 
 - Reads `package.json`, npm/pnpm/yarn lockfiles, `pyproject.toml`, Poetry/uv lockfiles, and exact `requirements*.txt` entries.
 - Ignores transitive and unrelated source changes.
-- Writes a job summary and annotations.
+- Reviews direct development dependencies as well as production dependencies.
+- Compares the exact PR commits, so checkout or merge changes cannot substitute different versions.
+- Writes a job summary with migration actions, evidence links, and annotations.
+- Accepts optional `node-version` and `python-version` inputs for runtime compatibility checks.
+- Exposes `reviewed`, `blocked`, and `unavailable` outputs for downstream workflow steps.
+- Treats invalid spend limits as zero; payments require at least $0.01 remaining and can never exceed $0.03 per run.
 - Fails only for an explicit `block` result. `review_required`, `unknown`, payment unavailable, and service errors remain non-failing.
 - Does not print, persist, or send wallet keys, GitHub OIDC assertions, repository contents, or complete manifests.
 

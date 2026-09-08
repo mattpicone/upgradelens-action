@@ -2,14 +2,17 @@ import { appendFile, readFile } from "node:fs/promises";
 import { dirname, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 import { detectDependencyChanges, prioritizeChanges } from "./extract.js";
+import { reviewRequest, spendLimit, paymentAllowed, normalizeReview, reviewSummary } from "./review.js";
 
 const dependencyFile = /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|pyproject\.toml|poetry\.lock|uv\.lock|requirements[^/]*\.txt)$/i;
 const service = (process.env["INPUT_SERVICE-URL"] || "https://upgradelens.mattpicone.workers.dev").replace(/\/$/, "");
 const requestedChanges = Number(process.env["INPUT_MAX-CHANGES"] || 3);
-const requestedSpend = Number(process.env["INPUT_MAX-SPEND-USD"] || 0.03);
 const maxChanges = Number.isFinite(requestedChanges) ? Math.min(3, Math.max(1, Math.floor(requestedChanges))) : 3;
-const maxSpendAtomic = Number.isFinite(requestedSpend) ? Math.round(Math.min(0.03, Math.max(0, requestedSpend)) * 1_000_000) : 30_000;
-const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+const maxSpendAtomic = spendLimit(process.env["INPUT_MAX-SPEND-USD"]);
+const runtime = Object.fromEntries(["node", "python"].flatMap((key) => {
+  const value = process.env[`INPUT_${key.toUpperCase()}-VERSION`]?.trim();
+  return value ? [[key, value]] : [];
+}));
 
 function command(name, args) {
   const result = spawnSync(name, args, { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
@@ -18,7 +21,7 @@ function command(name, args) {
 }
 
 function annotation(level, message) {
-  process.stdout.write(`::${level}::${String(message).replace(/[\r\n]+/g, " ")}\n`);
+  process.stdout.write(`::${level}::${String(message).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A")}\n`);
 }
 
 async function summary(markdown) {
@@ -56,7 +59,7 @@ function contentResult(result) {
 let paidClientPromise = null;
 let spentAtomic = 0;
 async function paidReview(change) {
-  if (!process.env.UPGRADELENS_BUYER_PRIVATE_KEY) return null;
+  if (!process.env.UPGRADELENS_BUYER_PRIVATE_KEY || maxSpendAtomic - spentAtomic < 10_000) return null;
   if (!paidClientPromise) paidClientPromise = (async () => {
     const [{ Client }, { StreamableHTTPClientTransport }, { x402MCPClient }, { x402Client }, { ExactEvmScheme }, { appendPaymentIdentifierToExtensions }, { privateKeyToAccount }] = await Promise.all([
       import("@modelcontextprotocol/sdk/client/index.js"),
@@ -77,27 +80,21 @@ async function paidReview(change) {
           extensions: appendPaymentIdentifierToExtensions(structuredClone(created.extensions || {})),
         }),
       });
-    const raw = new Client({ name: "upgradelens-action", version: "0.1.0" }, { capabilities: {} });
+    const raw = new Client({ name: "upgradelens-action", version: "0.1.1" }, { capabilities: {} });
     const buyer = new x402MCPClient(raw, payment, {
       autoPayment: true,
       onPaymentRequested: ({ toolName, paymentRequired }) => {
-        const accepts = paymentRequired?.accepts || [];
-        const requirement = accepts.length === 1 ? accepts[0] : null;
-        const amount = Number(requirement?.amount);
-        const allowed = toolName === "review_dependency_upgrade" && requirement?.scheme === "exact" &&
-          paymentRequired?.resource?.url === `${service}/mcp#review_dependency_upgrade` &&
-          requirement?.network === "eip155:8453" && String(requirement?.asset || "").toLowerCase() === BASE_USDC &&
-          /^0x[0-9a-fA-F]{40}$/.test(requirement?.payTo || "") && Number.isSafeInteger(amount) && amount === 10_000 &&
-          spentAtomic + amount <= maxSpendAtomic;
-        if (allowed) spentAtomic += amount;
+        const allowed = paymentAllowed({ toolName, paymentRequired, service, spentAtomic, maxSpendAtomic });
+        if (allowed) spentAtomic += 10_000;
         return allowed;
       },
     });
-    await buyer.connect(new StreamableHTTPClientTransport(new URL(`${service}/mcp`)));
+    try { await buyer.connect(new StreamableHTTPClientTransport(new URL(`${service}/mcp`))); }
+    catch (error) { await buyer.close().catch(() => {}); throw error; }
     return buyer;
   })();
   const buyer = await paidClientPromise;
-  return contentResult(await buyer.callTool("review_dependency_upgrade", { ...change, detail: "compact" }));
+  return normalizeReview(contentResult(await buyer.callTool("review_dependency_upgrade", reviewRequest(change, runtime))));
 }
 
 async function review(change, entitlement) {
@@ -108,27 +105,24 @@ async function review(change, entitlement) {
       accept: "application/json",
       ...(entitlement ? { "x-upgradelens-trial-token": entitlement } : {}),
     },
-    body: JSON.stringify({ ...change, detail: "compact" }),
+    body: JSON.stringify(reviewRequest(change, runtime)),
     signal: AbortSignal.timeout(30_000),
   });
-  if (response.status === 402) return paidReview(change);
+  if (response.status === 402) {
+    try { return await paidReview(change); }
+    catch { throw new Error("Paid review unavailable. Check wallet configuration, remaining budget, and service payment readiness."); }
+  }
   const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(`review returned ${response.status}: ${body?.error?.message || "unknown error"}`);
-  return body;
+  return normalizeReview(body);
 }
 
 async function fileAtRevision(revision, path) {
   try { return command("git", ["show", `${revision}:${path}`]); } catch { return null; }
 }
 
-async function currentFile(path) {
-  try {
-    const value = await readFile(path, "utf8");
-    return value.length <= 2 * 1024 * 1024 ? value : null;
-  } catch { return null; }
-}
-
 async function main() {
+  if (process.env.GITHUB_OUTPUT) await appendFile(process.env.GITHUB_OUTPUT, "reviewed=0\nblocked=0\nunavailable=0\n");
   const event = JSON.parse(await readFile(process.env.GITHUB_EVENT_PATH, "utf8"));
   const base = event.pull_request?.base?.sha;
   const head = event.pull_request?.head?.sha || process.env.GITHUB_SHA;
@@ -136,7 +130,8 @@ async function main() {
     await summary("## UpgradeLens\n\nSkipped: this action runs only for pull requests.\n");
     return;
   }
-  const changed = command("git", ["diff", "--name-only", base, head, "--"]).split(/\r?\n/).filter(dependencyFile.test.bind(dependencyFile));
+  if (!/^[a-f0-9]{40,64}$/i.test(base) || !/^[a-f0-9]{40,64}$/i.test(head)) throw new Error("Pull request revisions must be full commit hashes.");
+  const changed = command("git", ["diff", "--name-only", "-z", base, head, "--"]).split("\0").filter(dependencyFile.test.bind(dependencyFile));
   const candidates = new Set(changed);
   for (const path of changed) {
     const folder = dirname(path);
@@ -144,7 +139,7 @@ async function main() {
     if (["package-lock.json", "pnpm-lock.yaml", "yarn.lock"].includes(name)) candidates.add(folder === "." ? "package.json" : `${folder}/package.json`);
     if (["poetry.lock", "uv.lock"].includes(name)) candidates.add(folder === "." ? "pyproject.toml" : `${folder}/pyproject.toml`);
   }
-  const files = await Promise.all([...candidates].map(async (path) => ({ path, before: await fileAtRevision(base, path), after: await currentFile(path) })));
+  const files = await Promise.all([...candidates].map(async (path) => ({ path, before: await fileAtRevision(base, path), after: await fileAtRevision(head, path) })));
   const security = /security|vulnerab|\bCVE-/i.test(`${event.pull_request.title || ""} ${event.pull_request.body || ""} ${(event.pull_request.labels || []).map((label) => label.name).join(" ")}`);
   const changes = prioritizeChanges(detectDependencyChanges(files), security, maxChanges);
   if (!changes.length) {
@@ -158,10 +153,11 @@ async function main() {
     try {
       const result = await review(change, entitlement);
       if (!result) {
-        results.push({ change, decision: "unknown", note: "Free repository unit unavailable and no compatible wallet was configured." });
-        annotation("warning", `${change.package}: analysis requires payment; configure UPGRADELENS_BUYER_PRIVATE_KEY as an Actions/Dependabot secret.`);
+        const note = "Review unavailable: the free unit is exhausted, and a funded wallet plus at least $0.01 remaining run budget is required for payment.";
+        results.push({ change, decision: "unknown", note });
+        annotation("warning", `${change.package}: ${note}`);
       } else {
-        results.push({ change, ...result });
+        results.push({ ...result, change });
         annotation(result.decision === "block" ? "error" : result.decision === "proceed" ? "notice" : "warning", `${change.package} ${change.current_version} → ${change.target_version}: ${result.decision}`);
       }
     } catch (error) {
@@ -169,12 +165,18 @@ async function main() {
       annotation("warning", `${change.package}: ${error.message}`);
     }
   }
-  const rows = results.map((row) => `| ${row.change.package} | ${row.change.current_version} → ${row.change.target_version} | ${row.decision} | ${row.risk_score ?? "—"} |`).join("\n");
-  await summary(`## UpgradeLens dependency review\n\n| Package | Upgrade | Decision | Risk |\n|---|---|---:|---:|\n${rows}\n\nAnalyzed ${results.length} direct change(s); maximum paid spend was $${(maxSpendAtomic / 1_000_000).toFixed(2)}. Repository contents, tokens, OIDC assertions, and wallet material were not sent as telemetry.\n`);
+  // Preserve an explicit block even if writing the report fails.
   if (results.some((row) => row.decision === "block")) process.exitCode = 1;
+  await summary(reviewSummary(results, maxSpendAtomic, spentAtomic));
+  if (process.env.GITHUB_OUTPUT) {
+    const counts = { reviewed: results.filter((row) => !row.note).length, blocked: results.filter((row) => row.decision === "block").length, unavailable: results.filter((row) => row.note).length };
+    await appendFile(process.env.GITHUB_OUTPUT, Object.entries(counts).map(([key, value]) => `${key}=${value}\n`).join(""));
+  }
 }
 
 main().catch(async (error) => {
   annotation("warning", error instanceof Error ? error.message : String(error));
   await summary("## UpgradeLens\n\nAnalysis was unavailable; the workflow remains non-blocking because no explicit `block` decision was returned.\n");
+}).finally(async () => {
+  if (paidClientPromise) await (await paidClientPromise.catch(() => null))?.close().catch(() => {});
 });
