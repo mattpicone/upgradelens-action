@@ -80,7 +80,7 @@ async function paidReview(change) {
           extensions: appendPaymentIdentifierToExtensions(structuredClone(created.extensions || {})),
         }),
       });
-    const raw = new Client({ name: "upgradelens-action", version: "0.1.1" }, { capabilities: {} });
+    const raw = new Client({ name: "upgradelens-action", version: "0.1.2" }, { capabilities: {} });
     const buyer = new x402MCPClient(raw, payment, {
       autoPayment: true,
       onPaymentRequested: ({ toolName, paymentRequired }) => {

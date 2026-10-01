@@ -13754,13 +13754,14 @@ var require_fast_uri = __commonJS({
         if (!malformedIPLiteral) {
           malformedHost = canonicalizeHost(parsed, options, schemeHandler, isIP);
         }
-        if (!schemeHandler || schemeHandler && !schemeHandler.skipNormalize) {
-          if (uri.indexOf("%") !== -1) {
-            if (parsed.host !== void 0 && !malformedIPLiteral) {
-              const host = isIP ? parsed.host : normalizePercentEncoding(parsed.host, true);
-              parsed.host = reescapeHostDelimiters(host, isIP);
-            }
+        if (uri.indexOf("%") !== -1 && parsed.host !== void 0 && !malformedIPLiteral) {
+          let host = isIP ? parsed.host : normalizePercentEncoding(parsed.host, true);
+          if (!isIP) {
+            host = normalizePercentEncoding(host.toLowerCase());
           }
+          parsed.host = reescapeHostDelimiters(host, isIP);
+        }
+        if (!schemeHandler || schemeHandler && !schemeHandler.skipNormalize) {
           if (parsed.path) {
             parsed.path = normalizePathEncoding(parsed.path);
           }
@@ -74599,10 +74600,11 @@ import { dirname, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // src/extract.js
-var EXACT = /^(?:v)?(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)$/;
+import { posix } from "node:path";
+var EXACT = /^(?:v)?(\d+(?:!\d+)?(?:\.\d+)*(?:(?:a|b|rc|post|dev)\d+|[-+._][0-9A-Za-z.-]+)*)$/i;
 function exact(value) {
   const normalized = String(value ?? "").trim().replace(/^['"]|['"]$/g, "");
-  const match = normalized.match(EXACT) || normalized.match(/^==\s*(.+)$/);
+  const match = normalized.replace(/^==\s*/, "").match(EXACT);
   return match ? String(match[1] ?? match[0]).replace(/^v/, "") : null;
 }
 function packageNameFromLockSelector(selector) {
@@ -74613,14 +74615,17 @@ function packageNameFromLockSelector(selector) {
   }
   return clean2.split("@")[0];
 }
-function add(map, ecosystem, name, version5, direct = false) {
+function normalizedName(ecosystem, name) {
+  return ecosystem === "pypi" ? name.toLowerCase().replace(/[._-]+/g, "-") : name.toLowerCase();
+}
+function add(map, ecosystem, name, version5, direct = false, scope = "") {
   const normalized = exact(version5);
   if (!name || !normalized) return;
-  map.set(`${ecosystem}:${name.toLowerCase()}`, { ecosystem, package: name, version: normalized, direct });
+  map.set(`${scope}${ecosystem}:${normalizedName(ecosystem, name)}`, { ecosystem, package: name, version: normalized, direct });
 }
 function markDirect(map, ecosystem, name) {
   if (!name) return;
-  const key = `${ecosystem}:${name.toLowerCase()}`;
+  const key = `${ecosystem}:${normalizedName(ecosystem, name)}`;
   const current = map.get(key);
   map.set(key, current ? { ...current, direct: true } : { ecosystem, package: name, version: null, direct: true });
 }
@@ -74658,6 +74663,7 @@ function parsePnpmLock(text, map) {
   let inImporter = false;
   let inDirectSection = false;
   let current = null;
+  let scope = "";
   for (const line of lines) {
     const indent = line.match(/^\s*/)?.[0].length ?? 0;
     if (/^importers:\s*$/.test(line)) {
@@ -74670,6 +74676,8 @@ function parsePnpmLock(text, map) {
       inImporter = false;
     }
     if (inImporters && indent === 2 && /^\s{2}.+:\s*$/.test(line)) {
+      const importer = line.trim().slice(0, -1).replace(/^['"]|['"]$/g, "");
+      scope = importer === "." ? "" : `${importer}\0`;
       inImporter = true;
       inDirectSection = false;
       continue;
@@ -74685,11 +74693,11 @@ function parsePnpmLock(text, map) {
     const name = indent === 6 ? line.match(/^\s{6}([^:#][^:]*):\s*(.*)$/) : null;
     if (name) {
       current = name[1].replace(/^['"]|['"]$/g, "");
-      if (name[2]) add(map, "npm", current, name[2], true);
+      if (name[2]) add(map, "npm", current, name[2], true, scope);
       continue;
     }
     const version5 = indent === 8 ? line.match(/^\s{8}version:\s*(.+)$/) : null;
-    if (version5 && current) add(map, "npm", current, version5[1].split("(")[0], true);
+    if (version5 && current) add(map, "npm", current, version5[1].split("(")[0], true, scope);
   }
 }
 function parseYarnLock(text, map, directNames2) {
@@ -74709,30 +74717,36 @@ function parseYarnLock(text, map, directNames2) {
 }
 function parseRequirements(text, map) {
   for (const line of text.split(/\r?\n/)) {
-    const match = line.trim().match(/^([A-Za-z0-9_.-]+)\s*==\s*([^\s;#]+)/);
+    const match = line.trim().match(/^([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?\s*==\s*([^\s;#]+)/);
     if (match) add(map, "pypi", match[1], match[2], true);
   }
 }
 function parsePyproject(text, map) {
   let section = "";
+  let inDependencies = false;
   for (const line of text.split(/\r?\n/)) {
     const heading = line.trim().match(/^\[([^\]]+)]$/);
     if (heading) {
       section = heading[1];
+      inDependencies = false;
       continue;
     }
-    if (section === "project") {
-      for (const dependency of line.matchAll(/["']([A-Za-z0-9_.-]+)\s*([^"']*)["']/g)) {
+    if (section === "project" || section === "project.optional-dependencies") {
+      if (section === "project" && /^\s*dependencies\s*=\s*\[/.test(line) || section === "project.optional-dependencies" && /^\s*[\w.-]+\s*=\s*\[/.test(line)) inDependencies = true;
+      if (!inDependencies) continue;
+      for (const dependency of line.matchAll(/["']([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?\s*([^"']*)["']/g)) {
         markDirect(map, "pypi", dependency[1]);
         const pinned = dependency[2].match(/^\s*==\s*([^;\s]+)/);
         if (pinned) add(map, "pypi", dependency[1], pinned[1], true);
       }
+      if (line.replace(/"[^"]*"|'[^']*'/g, "").includes("]")) inDependencies = false;
     }
-    if (/^tool\.poetry\.(dependencies|group\.[^.]+\.dependencies)$/.test(section)) {
-      const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*["']([^"']+)["']/);
+    if (/^tool\.poetry\.(dependencies|dev-dependencies|group\.[^.]+\.dependencies)$/.test(section)) {
+      const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+)/);
       if (match && match[1].toLowerCase() !== "python") {
         markDirect(map, "pypi", match[1]);
-        add(map, "pypi", match[1], match[2], true);
+        const version5 = match[2].match(/^["']([^"']+)["']/) || match[2].match(/\bversion\s*=\s*["']([^"']+)["']/);
+        if (version5) add(map, "pypi", match[1], version5[1], true);
       }
     }
   }
@@ -74750,13 +74764,13 @@ function parsePythonLock(text, map, directNames2) {
       continue;
     }
     const version5 = line.match(/^version\s*=\s*["']([^"']+)["']/);
-    if (name && version5 && directNames2.has(name.toLowerCase())) add(map, "pypi", name, version5[1], true);
+    if (name && version5 && directNames2.has(normalizedName("pypi", name))) add(map, "pypi", name, version5[1], true);
   }
 }
 function directNames(map, ecosystem) {
-  return new Set([...map.values()].filter((entry) => entry.ecosystem === ecosystem && entry.direct).map((entry) => entry.package.toLowerCase()));
+  return new Set([...map.values()].filter((entry) => entry.ecosystem === ecosystem && entry.direct).map((entry) => normalizedName(ecosystem, entry.package)));
 }
-function dependencySnapshot(files, side) {
+function folderSnapshot(files, side) {
   const map = /* @__PURE__ */ new Map();
   const available = files.filter((file) => typeof file[side] === "string");
   for (const file of available) {
@@ -74778,6 +74792,19 @@ function dependencySnapshot(files, side) {
   }
   return map;
 }
+function dependencySnapshot(files, side) {
+  const folders = /* @__PURE__ */ new Map();
+  for (const file of files) {
+    const folder = posix.dirname(file.path);
+    if (!folders.has(folder)) folders.set(folder, []);
+    folders.get(folder).push(file);
+  }
+  const snapshot = /* @__PURE__ */ new Map();
+  for (const [folder, entries] of folders) {
+    for (const [key, value] of folderSnapshot(entries, side)) snapshot.set(`${folder}\0${key}`, value);
+  }
+  return snapshot;
+}
 function detectDependencyChanges(files) {
   const before = dependencySnapshot(files, "before");
   const after = dependencySnapshot(files, "after");
@@ -74792,7 +74819,8 @@ function detectDependencyChanges(files) {
       target_version: target.version
     });
   }
-  return changes.sort((left, right) => `${left.ecosystem}:${left.package}`.localeCompare(`${right.ecosystem}:${right.package}`));
+  const unique = new Map(changes.map((change) => [JSON.stringify(change), change]));
+  return [...unique.values()].sort((left, right) => `${left.ecosystem}:${left.package}`.localeCompare(`${right.ecosystem}:${right.package}`));
 }
 function major(version5) {
   return Number(String(version5).split(".")[0]);
@@ -74943,7 +74971,7 @@ async function paidReview(change) {
         extensions: appendPaymentIdentifierToExtensions2(structuredClone(created.extensions || {}))
       })
     });
-    const raw = new Client2({ name: "upgradelens-action", version: "0.1.1" }, { capabilities: {} });
+    const raw = new Client2({ name: "upgradelens-action", version: "0.1.2" }, { capabilities: {} });
     const buyer2 = new x402MCPClient2(raw, payment, {
       autoPayment: true,
       onPaymentRequested: ({ toolName, paymentRequired }) => {

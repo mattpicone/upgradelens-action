@@ -1,6 +1,6 @@
 {
   "name": "upgradelens-action",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Read-only dependency pull-request review with UpgradeLens",
@@ -19,6 +19,10 @@
   },
   "devDependencies": {
     "esbuild": "0.25.9",
-    "vitest": "3.2.7"
+    "vitest": "4.1.11",
+    "vite": "7.3.6"
+  },
+  "overrides": {
+    "vite": "7.3.6"
   }
 }

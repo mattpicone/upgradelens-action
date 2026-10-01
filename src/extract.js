@@ -1,8 +1,10 @@
-const EXACT = /^(?:v)?(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)$/;
+import { posix } from "node:path";
+
+const EXACT = /^(?:v)?(\d+(?:!\d+)?(?:\.\d+)*(?:(?:a|b|rc|post|dev)\d+|[-+._][0-9A-Za-z.-]+)*)$/i;
 
 function exact(value) {
   const normalized = String(value ?? "").trim().replace(/^['"]|['"]$/g, "");
-  const match = normalized.match(EXACT) || normalized.match(/^==\s*(.+)$/);
+  const match = normalized.replace(/^==\s*/, "").match(EXACT);
   return match ? String(match[1] ?? match[0]).replace(/^v/, "") : null;
 }
 
@@ -15,15 +17,19 @@ function packageNameFromLockSelector(selector) {
   return clean.split("@")[0];
 }
 
-function add(map, ecosystem, name, version, direct = false) {
+function normalizedName(ecosystem, name) {
+  return ecosystem === "pypi" ? name.toLowerCase().replace(/[._-]+/g, "-") : name.toLowerCase();
+}
+
+function add(map, ecosystem, name, version, direct = false, scope = "") {
   const normalized = exact(version);
   if (!name || !normalized) return;
-  map.set(`${ecosystem}:${name.toLowerCase()}`, { ecosystem, package: name, version: normalized, direct });
+  map.set(`${scope}${ecosystem}:${normalizedName(ecosystem, name)}`, { ecosystem, package: name, version: normalized, direct });
 }
 
 function markDirect(map, ecosystem, name) {
   if (!name) return;
-  const key = `${ecosystem}:${name.toLowerCase()}`;
+  const key = `${ecosystem}:${normalizedName(ecosystem, name)}`;
   const current = map.get(key);
   map.set(key, current ? { ...current, direct: true } : { ecosystem, package: name, version: null, direct: true });
 }
@@ -58,11 +64,16 @@ function parsePnpmLock(text, map) {
   let inImporter = false;
   let inDirectSection = false;
   let current = null;
+  let scope = "";
   for (const line of lines) {
     const indent = line.match(/^\s*/)?.[0].length ?? 0;
     if (/^importers:\s*$/.test(line)) { inImporters = true; inImporter = false; continue; }
     if (inImporters && indent === 0 && line.trim()) { inImporters = false; inImporter = false; }
-    if (inImporters && indent === 2 && /^\s{2}.+:\s*$/.test(line)) { inImporter = true; inDirectSection = false; continue; }
+    if (inImporters && indent === 2 && /^\s{2}.+:\s*$/.test(line)) {
+      const importer = line.trim().slice(0, -1).replace(/^['"]|['"]$/g, "");
+      scope = importer === "." ? "" : `${importer}\0`;
+      inImporter = true; inDirectSection = false; continue;
+    }
     if (!inImporter) continue;
     if (/^\s{4}(dependencies|optionalDependencies|devDependencies):\s*$/.test(line)) { inDirectSection = true; current = null; continue; }
     if (indent <= 4 && !/^\s*$/.test(line) && !/^\s{4}(dependencies|optionalDependencies|devDependencies):/.test(line)) inDirectSection = false;
@@ -70,11 +81,11 @@ function parsePnpmLock(text, map) {
     const name = indent === 6 ? line.match(/^\s{6}([^:#][^:]*):\s*(.*)$/) : null;
     if (name) {
       current = name[1].replace(/^['"]|['"]$/g, "");
-      if (name[2]) add(map, "npm", current, name[2], true);
+      if (name[2]) add(map, "npm", current, name[2], true, scope);
       continue;
     }
     const version = indent === 8 ? line.match(/^\s{8}version:\s*(.+)$/) : null;
-    if (version && current) add(map, "npm", current, version[1].split("(")[0], true);
+    if (version && current) add(map, "npm", current, version[1].split("(")[0], true, scope);
   }
 }
 
@@ -96,28 +107,34 @@ function parseYarnLock(text, map, directNames) {
 
 function parseRequirements(text, map) {
   for (const line of text.split(/\r?\n/)) {
-    const match = line.trim().match(/^([A-Za-z0-9_.-]+)\s*==\s*([^\s;#]+)/);
+    const match = line.trim().match(/^([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?\s*==\s*([^\s;#]+)/);
     if (match) add(map, "pypi", match[1], match[2], true);
   }
 }
 
 function parsePyproject(text, map) {
   let section = "";
+  let inDependencies = false;
   for (const line of text.split(/\r?\n/)) {
     const heading = line.trim().match(/^\[([^\]]+)]$/);
-    if (heading) { section = heading[1]; continue; }
-    if (section === "project") {
-      for (const dependency of line.matchAll(/["']([A-Za-z0-9_.-]+)\s*([^"']*)["']/g)) {
+    if (heading) { section = heading[1]; inDependencies = false; continue; }
+    if (section === "project" || section === "project.optional-dependencies") {
+      if ((section === "project" && /^\s*dependencies\s*=\s*\[/.test(line)) ||
+        (section === "project.optional-dependencies" && /^\s*[\w.-]+\s*=\s*\[/.test(line))) inDependencies = true;
+      if (!inDependencies) continue;
+      for (const dependency of line.matchAll(/["']([A-Za-z0-9_.-]+)(?:\[[^\]]+\])?\s*([^"']*)["']/g)) {
         markDirect(map, "pypi", dependency[1]);
         const pinned = dependency[2].match(/^\s*==\s*([^;\s]+)/);
         if (pinned) add(map, "pypi", dependency[1], pinned[1], true);
       }
+      if (line.replace(/"[^"]*"|'[^']*'/g, "").includes("]")) inDependencies = false;
     }
-    if (/^tool\.poetry\.(dependencies|group\.[^.]+\.dependencies)$/.test(section)) {
-      const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*["']([^"']+)["']/);
+    if (/^tool\.poetry\.(dependencies|dev-dependencies|group\.[^.]+\.dependencies)$/.test(section)) {
+      const match = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+)/);
       if (match && match[1].toLowerCase() !== "python") {
         markDirect(map, "pypi", match[1]);
-        add(map, "pypi", match[1], match[2], true);
+        const version = match[2].match(/^["']([^"']+)["']/) || match[2].match(/\bversion\s*=\s*["']([^"']+)["']/);
+        if (version) add(map, "pypi", match[1], version[1], true);
       }
     }
   }
@@ -130,15 +147,15 @@ function parsePythonLock(text, map, directNames) {
     const nameMatch = line.match(/^name\s*=\s*["']([^"']+)["']/);
     if (nameMatch) { name = nameMatch[1]; continue; }
     const version = line.match(/^version\s*=\s*["']([^"']+)["']/);
-    if (name && version && directNames.has(name.toLowerCase())) add(map, "pypi", name, version[1], true);
+    if (name && version && directNames.has(normalizedName("pypi", name))) add(map, "pypi", name, version[1], true);
   }
 }
 
 function directNames(map, ecosystem) {
-  return new Set([...map.values()].filter((entry) => entry.ecosystem === ecosystem && entry.direct).map((entry) => entry.package.toLowerCase()));
+  return new Set([...map.values()].filter((entry) => entry.ecosystem === ecosystem && entry.direct).map((entry) => normalizedName(ecosystem, entry.package)));
 }
 
-export function dependencySnapshot(files, side) {
+function folderSnapshot(files, side) {
   const map = new Map();
   const available = files.filter((file) => typeof file[side] === "string");
   for (const file of available) {
@@ -161,6 +178,22 @@ export function dependencySnapshot(files, side) {
   return map;
 }
 
+export function dependencySnapshot(files, side) {
+  // Compare each project independently. Otherwise a later package.json can
+  // overwrite the same dependency in another app and fabricate an upgrade.
+  const folders = new Map();
+  for (const file of files) {
+    const folder = posix.dirname(file.path);
+    if (!folders.has(folder)) folders.set(folder, []);
+    folders.get(folder).push(file);
+  }
+  const snapshot = new Map();
+  for (const [folder, entries] of folders) {
+    for (const [key, value] of folderSnapshot(entries, side)) snapshot.set(`${folder}\0${key}`, value);
+  }
+  return snapshot;
+}
+
 export function detectDependencyChanges(files) {
   const before = dependencySnapshot(files, "before");
   const after = dependencySnapshot(files, "after");
@@ -175,7 +208,8 @@ export function detectDependencyChanges(files) {
       target_version: target.version,
     });
   }
-  return changes.sort((left, right) => `${left.ecosystem}:${left.package}`.localeCompare(`${right.ecosystem}:${right.package}`));
+  const unique = new Map(changes.map((change) => [JSON.stringify(change), change]));
+  return [...unique.values()].sort((left, right) => `${left.ecosystem}:${left.package}`.localeCompare(`${right.ecosystem}:${right.package}`));
 }
 
 function major(version) {
