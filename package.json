@@ -1,6 +1,6 @@
 {
   "name": "upgradelens-action",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Read-only dependency pull-request review with UpgradeLens",
@@ -10,7 +10,7 @@
     "check": "npm run test && npm run build && git diff --exit-code -- dist/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@x402/core": "2.24.0",
     "@x402/evm": "2.24.0",
     "@x402/extensions": "2.24.0",
@@ -19,6 +19,11 @@
   },
   "devDependencies": {
     "esbuild": "0.25.9",
-    "vitest": "3.2.7"
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
+  },
+  "overrides": {
+    "vite": "7.3.6",
+    "source-map-js": "1.2.2"
   }
 }

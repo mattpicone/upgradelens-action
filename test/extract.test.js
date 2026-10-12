@@ -2,6 +2,42 @@ import { describe, expect, it } from "vitest";
 import { detectDependencyChanges, prioritizeChanges } from "../src/extract.js";
 
 describe("direct dependency extraction", () => {
+  it("compares identical dependency names independently across monorepo projects", () => {
+    const manifest = (version) => JSON.stringify({ dependencies: { express: version } });
+    const changes = detectDependencyChanges([
+      { path: "apps/api/package.json", before: manifest("4.19.2"), after: manifest("5.1.0") },
+      { path: "apps/admin/package.json", before: manifest("4.18.0"), after: manifest("4.18.0") },
+    ]);
+    expect(changes).toEqual([{ ecosystem: "npm", package: "express", current_version: "4.19.2", target_version: "5.1.0" }]);
+    expect(detectDependencyChanges([
+      { path: "old/package.json", before: manifest("4.19.2"), after: null },
+      { path: "new/package.json", before: null, after: manifest("5.1.0") },
+    ])).toEqual([]);
+  });
+
+  it("does not let another pnpm importer hide a dependency upgrade", () => {
+    const lock = (version) => `importers:\n  apps/api:\n    dependencies:\n      express:\n        version: ${version}\n  apps/admin:\n    dependencies:\n      express:\n        version: 4.18.0\n`;
+    expect(detectDependencyChanges([{ path: "pnpm-lock.yaml", before: lock("4.19.2"), after: lock("5.1.0") }]))
+      .toEqual([{ ecosystem: "npm", package: "express", current_version: "4.19.2", target_version: "5.1.0" }]);
+  });
+
+  it("does not resolve a project metadata name as a direct uv dependency", () => {
+    const files = [
+      { path: "pyproject.toml", before: '[project]\nname = "django"\ndependencies = ["requests[socks]>=2"]\ndescription = "asgiref"', after: '[project]\nname = "django"\ndependencies = ["requests[socks]>=2"]\ndescription = "asgiref"' },
+      { path: "uv.lock", before: '[[package]]\nname = "django"\nversion = "4.2.11"\n[[package]]\nname = "asgiref"\nversion = "3.7.0"\n[[package]]\nname = "requests"\nversion = "2.31.0"', after: '[[package]]\nname = "django"\nversion = "5.1.1"\n[[package]]\nname = "asgiref"\nversion = "3.8.0"\n[[package]]\nname = "requests"\nversion = "2.32.4"' },
+    ];
+    expect(detectDependencyChanges(files)).toEqual([{ ecosystem: "pypi", package: "requests", current_version: "2.31.0", target_version: "2.32.4" }]);
+  });
+
+  it("normalizes PyPI names and supports exact PEP 440 prerelease pins without wildcard ranges", () => {
+    expect(detectDependencyChanges([
+      { path: "requirements.txt", before: "Django==5.2rc1\nFlask==2.*\nzope.interface==7.0.0", after: "django==5.2rc2\nFlask==3.*\nzope-interface==7.1.0" },
+    ])).toEqual([
+      { ecosystem: "pypi", package: "django", current_version: "5.2rc1", target_version: "5.2rc2" },
+      { ecosystem: "pypi", package: "zope-interface", current_version: "7.0.0", target_version: "7.1.0" },
+    ]);
+  });
+
   it("resolves direct npm development tools without including their transitive dependencies", () => {
     const lock = (version) => JSON.stringify({ packages: { "": { devDependencies: { vite: "^" + version } }, "node_modules/vite": { version }, "node_modules/transitive": { version } } });
     expect(detectDependencyChanges([{ path: "package-lock.json", before: lock("6.1.0"), after: lock("7.0.0") }]))
@@ -66,6 +102,17 @@ describe("direct dependency extraction", () => {
     expect(detectDependencyChanges([{ path: "requirements-dev.txt", before, after }])).toEqual([
       { ecosystem: "pypi", package: "requests", current_version: "2.31.0", target_version: "2.32.4" },
     ]);
+  });
+
+  it("supports extras in requirements pins and table-form Poetry declarations", () => {
+    expect(detectDependencyChanges([{ path: "requirements.txt", before: "requests[socks]==2.31.0", after: "requests[socks]==2.32.4" }]))
+      .toEqual([{ ecosystem: "pypi", package: "requests", current_version: "2.31.0", target_version: "2.32.4" }]);
+    const manifest = '[tool.poetry.dependencies]\nrequests = {version = "^2", extras = ["socks"]}';
+    const lock = (version) => `[[package]]\nname = "requests"\nversion = "${version}"`;
+    expect(detectDependencyChanges([
+      { path: "pyproject.toml", before: manifest, after: manifest },
+      { path: "poetry.lock", before: lock("2.31.0"), after: lock("2.32.4") },
+    ])).toEqual([{ ecosystem: "pypi", package: "requests", current_version: "2.31.0", target_version: "2.32.4" }]);
   });
 
   it("prioritizes security, then majors, caps grouped updates at three, and tolerates malformed files", () => {

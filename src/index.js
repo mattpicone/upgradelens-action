@@ -6,8 +6,11 @@ import { reviewRequest, spendLimit, paymentAllowed, normalizeReview, reviewSumma
 
 const dependencyFile = /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|pyproject\.toml|poetry\.lock|uv\.lock|requirements[^/]*\.txt)$/i;
 const service = (process.env["INPUT_SERVICE-URL"] || "https://upgradelens.mattpicone.workers.dev").replace(/\/$/, "");
-const requestedChanges = Number(process.env["INPUT_MAX-CHANGES"] || 3);
-const maxChanges = Number.isFinite(requestedChanges) ? Math.min(3, Math.max(1, Math.floor(requestedChanges))) : 3;
+const requestedChanges = Number(process.env["INPUT_MAX-CHANGES"] || 1);
+const maxChanges = Number.isFinite(requestedChanges) ? Math.min(3, Math.max(1, Math.floor(requestedChanges))) : 1;
+const userAgent = process.env.UPGRADELENS_VERIFICATION === "true"
+  ? "upgradelens-payment-probe/0.1.3 action-owned-ci"
+  : "upgradelens-action/0.1.3";
 const maxSpendAtomic = spendLimit(process.env["INPUT_MAX-SPEND-USD"]);
 const runtime = Object.fromEntries(["node", "python"].flatMap((key) => {
   const value = process.env[`INPUT_${key.toUpperCase()}-VERSION`]?.trim();
@@ -40,7 +43,7 @@ async function oidcEntitlement() {
   const assertion = (await oidc.json()).value;
   const exchange = await fetch(`${service}/v1/trials/github/exchange`, {
     method: "POST",
-    headers: { authorization: `Bearer ${assertion}`, accept: "application/json" },
+    headers: { authorization: `Bearer ${assertion}`, accept: "application/json", "user-agent": userAgent },
     signal: AbortSignal.timeout(15_000),
   });
   if (!exchange.ok) throw new Error(`UpgradeLens OIDC exchange returned ${exchange.status}`);
@@ -80,7 +83,7 @@ async function paidReview(change) {
           extensions: appendPaymentIdentifierToExtensions(structuredClone(created.extensions || {})),
         }),
       });
-    const raw = new Client({ name: "upgradelens-action", version: "0.1.1" }, { capabilities: {} });
+    const raw = new Client({ name: "upgradelens-action", version: "0.1.3" }, { capabilities: {} });
     const buyer = new x402MCPClient(raw, payment, {
       autoPayment: true,
       onPaymentRequested: ({ toolName, paymentRequired }) => {
@@ -89,7 +92,9 @@ async function paidReview(change) {
         return allowed;
       },
     });
-    try { await buyer.connect(new StreamableHTTPClientTransport(new URL(`${service}/mcp`))); }
+    try { await buyer.connect(new StreamableHTTPClientTransport(new URL(`${service}/mcp`), {
+      requestInit: { headers: { "user-agent": userAgent } },
+    })); }
     catch (error) { await buyer.close().catch(() => {}); throw error; }
     return buyer;
   })();
@@ -103,6 +108,7 @@ async function review(change, entitlement) {
     headers: {
       "content-type": "application/json",
       accept: "application/json",
+      "user-agent": userAgent,
       ...(entitlement ? { "x-upgradelens-trial-token": entitlement } : {}),
     },
     body: JSON.stringify(reviewRequest(change, runtime)),
