@@ -14,7 +14,5 @@ jobs:
           fetch-depth: 0
       - uses: mattpicone/upgradelens-action@v0
         with:
-          max-spend-usd: "0.03"
-        env:
-          # Optional. For Dependabot PRs, configure this as a Dependabot secret.
-          UPGRADELENS_BUYER_PRIVATE_KEY: ${{ secrets.UPGRADELENS_BUYER_PRIVATE_KEY }}
+          max-changes: "1"
+          max-spend-usd: "0"

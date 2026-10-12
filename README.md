@@ -4,7 +4,7 @@ A read-only JavaScript Action that reviews exact direct npm and PyPI dependency 
 
 The Action examines dependency manifests and lockfiles locally, selects at most three direct changes (security updates first, then major updates), and sends only the ecosystem, package name, current version, target version, and optional runtime to UpgradeLens. It never uploads repository source.
 
-## Install
+## First review: no wallet required
 
 ```yaml
 name: UpgradeLens dependency review
@@ -23,21 +23,39 @@ jobs:
           fetch-depth: 0
       - uses: mattpicone/upgradelens-action@v0
         with:
-          max-spend-usd: "0.03"
-        env:
-          # Optional: needed only for paid reviews after the free unit.
-          UPGRADELENS_BUYER_PRIVATE_KEY: ${{ secrets.UPGRADELENS_BUYER_PRIVATE_KEY }}
+          max-changes: "1"
+          max-spend-usd: "0"
 ```
 
 No account or API key is needed. With `id-token: write`, each immutable GitHub repository ID receives one free analysis unit per rolling 30 days. The OIDC assertion is exchanged for a 15-minute repository-bound entitlement and is never added to telemetry.
 
+The default reviews the highest-priority dependency change, matching the one-unit free evaluation. No private key is needed to get a cited first result. Repeated runs after the rolling unit is consumed report an unavailable review unless payment is configured.
+
+## Repeated and paid reviews
+
 For automatic x402 payment after the free unit, configure `UPGRADELENS_BUYER_PRIVATE_KEY` as an Actions secret holding a compatible Base wallet private key with sufficient USDC. For Dependabot-triggered runs it must be a [Dependabot secret](https://docs.github.com/en/code-security/dependabot/troubleshooting-dependabot/troubleshooting-dependabot-on-github-actions#accessing-secrets). The default and documented maximum is $0.03 per run; the Action accepts only the exact UpgradeLens `review_dependency_upgrade` resource at $0.01 on Base.
+
+To review up to three selected changes with a strict three-cent run ceiling:
+
+```yaml
+      - uses: mattpicone/upgradelens-action@v0
+        with:
+          max-changes: "3"
+          max-spend-usd: "0.03"
+        env:
+          UPGRADELENS_BUYER_PRIVATE_KEY: ${{ secrets.UPGRADELENS_BUYER_PRIVATE_KEY }}
+```
+
+The Action reads changed manifests and lockfiles locally, then returns the
+upgrade decision, ordered migration actions and source links in the job
+summary. It does not change your dependency files or merge your PR.
 
 ## Behavior
 
 - Reads `package.json`, npm/pnpm/yarn lockfiles, `pyproject.toml`, Poetry/uv lockfiles, and exact `requirements*.txt` entries.
 - Ignores transitive and unrelated source changes.
 - Reviews direct development dependencies as well as production dependencies.
+- Selects one highest-priority change by default; `max-changes: "3"` explicitly enables up to three reviews.
 - Compares the exact PR commits, so checkout or merge changes cannot substitute different versions.
 - Writes a job summary with migration actions, evidence links, and annotations.
 - Accepts optional `node-version` and `python-version` inputs for runtime compatibility checks.
@@ -56,3 +74,11 @@ npm test
 npm run build
 git diff --exit-code -- dist/index.js
 ```
+
+## Verification
+
+`npm test` verifies extraction, spending limits and the actual bundled entry
+point. The manually dispatched **Live free-review verification** workflow
+uses an owned fixture, GitHub OIDC, no wallet and a zero spending ceiling.
+Its requests identify themselves as verification traffic, so they cannot
+increase genuine demand or revenue statistics. It is not customer activity.

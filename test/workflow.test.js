@@ -15,9 +15,9 @@ beforeAll(async () => {
   git("config", "user.name", "Test");
   git("config", "user.email", "test@example.invalid");
   const commit = () => { git("add", "package.json"); git("-c", "commit.gpgsign=false", "commit", "-m", "fixture"); return git("rev-parse", "HEAD"); };
-  await writeFile(join(folder, "package.json"), JSON.stringify({ devDependencies: { vite: "6.1.0" } }));
+  await writeFile(join(folder, "package.json"), JSON.stringify({ devDependencies: { vite: "6.1.0", zod: "4.0.0" } }));
   const base = commit();
-  await writeFile(join(folder, "package.json"), JSON.stringify({ devDependencies: { vite: "7.0.0" } }));
+  await writeFile(join(folder, "package.json"), JSON.stringify({ devDependencies: { vite: "7.0.0", zod: "4.0.1" } }));
   const head = commit();
   // Checkout/working-copy contents must never substitute for the requested PR head.
   await writeFile(join(folder, "package.json"), JSON.stringify({ devDependencies: { vite: "99.0.0" } }));
@@ -40,6 +40,21 @@ beforeAll(async () => {
 afterAll(async () => { if (folder) await rm(folder, { recursive: true, force: true }); });
 
 describe("real action entry point", () => {
+  it.each(entryPoints)("%s reviews multiple changes only when explicitly configured", async (entry) => {
+    const key = `${entry.replaceAll("/", "-")}-multiple`;
+    const summary = join(folder, `${key}.md`), output = join(folder, `${key}.outputs`), requests = join(folder, `${key}.requests`);
+    const run = spawnSync(process.execPath, ["--import", join(folder, "fetch.mjs"), fileURLToPath(new URL(`../${entry}`, import.meta.url))], {
+      cwd: folder, encoding: "utf8", timeout: 15000,
+      env: { PATH: process.env.PATH, GITHUB_EVENT_PATH: join(folder, "event.json"), GITHUB_STEP_SUMMARY: summary,
+        GITHUB_OUTPUT: output, "INPUT_SERVICE-URL": "https://service.example", "INPUT_MAX-CHANGES": "3",
+        "INPUT_MAX-SPEND-USD": "0", UPGRADELENS_VERIFICATION: "true", SCENARIO: "success", REQUESTS_FILE: requests },
+    });
+    expect(run.status, run.stderr).toBe(0);
+    const calls = (await readFile(requests, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(calls.map(call => call.package)).toEqual(["vite", "zod"]);
+    expect((await readFile(summary, "utf8"))).toContain("Completed 2 of 2");
+  });
+
   it.each(entryPoints.flatMap((entry) => ["success", "block", "payment", "outage"].map((scenario) => [entry, scenario])))("%s handles %s without disclosing repo contents or signing a payment", async (entry, scenario) => {
     const source = fileURLToPath(new URL(`../${entry}`, import.meta.url));
     const key = `${entry.replaceAll("/", "-")}-${scenario}`;

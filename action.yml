@@ -16,7 +16,7 @@ inputs:
   max-changes:
     description: Maximum number of direct dependency changes to review (hard-capped at three)
     required: false
-    default: "3"
+    default: "1"
   node-version:
     description: Exact Node runtime version to check, for example 22.0.0
     required: false
