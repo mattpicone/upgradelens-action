@@ -33,7 +33,7 @@ The default reviews the highest-priority dependency change, matching the one-uni
 
 ## Repeated and paid reviews
 
-For automatic x402 payment after the free unit, configure `UPGRADELENS_BUYER_PRIVATE_KEY` as an Actions secret holding a compatible Base wallet private key with sufficient USDC. For Dependabot-triggered runs it must be a [Dependabot secret](https://docs.github.com/en/code-security/dependabot/troubleshooting-dependabot/troubleshooting-dependabot-on-github-actions#accessing-secrets). The default and documented maximum is $0.03 per run; the Action accepts only the exact UpgradeLens `review_dependency_upgrade` resource at $0.01 on Base.
+For automatic x402 payment after the free unit, configure `UPGRADELENS_BUYER_PRIVATE_KEY` as an Actions secret holding a compatible Base wallet private key with sufficient USDC. For Dependabot-triggered runs it must be a [Dependabot secret](https://docs.github.com/en/code-security/dependabot/troubleshooting-dependabot/troubleshooting-dependabot-on-github-actions#accessing-secrets). The default spending ceiling is $0.03 per run, while the first-review workflow sets it to zero; the Action accepts only the exact UpgradeLens `review_dependency_upgrade` resource at $0.01 on Base.
 
 To review up to three selected changes with a strict three-cent run ceiling:
 
@@ -49,6 +49,23 @@ To review up to three selected changes with a strict three-cent run ceiling:
 The Action reads changed manifests and lockfiles locally, then returns the
 upgrade decision, ordered migration actions and source links in the job
 summary. It does not change your dependency files or merge your PR.
+
+## Provide your application runtime
+
+Set `node-version` or `python-version` to the runtime your application actually
+uses. Without it, an upgrade with a declared runtime requirement returns
+`unknown` because compatibility cannot be verified. The Action runner's Node
+version does not establish your application's runtime.
+
+```yaml
+        with:
+          max-changes: "1"
+          max-spend-usd: "0"
+          node-version: "22" # Use your application's actual version.
+```
+
+[Public MCP configuration and bounded buyer examples](examples/README.md)
+are available for agent integrations beyond GitHub pull requests.
 
 ## Behavior
 
