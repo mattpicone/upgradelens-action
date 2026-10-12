@@ -83,6 +83,12 @@ are available for agent integrations beyond GitHub pull requests.
 
 Marketplace publication is intentionally not required. Pin the Action to a release commit SHA for the strongest supply-chain control; the moving `v0` tag tracks compatible v0 releases.
 
+## Data handling and support
+
+Read [what the Action and service send and retain](PRIVACY.md) before enabling
+it on a private repository. [Report bugs or request support](https://github.com/mattpicone/upgradelens-action/issues)
+without including secrets. The Action is licensed under [MIT](LICENSE).
+
 ## Development
 
 ```sh
