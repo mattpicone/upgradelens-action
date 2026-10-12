@@ -1,5 +1,7 @@
 # UpgradeLens Action
 
+[Install from GitHub Marketplace](https://github.com/marketplace/actions/upgradelens-dependency-review).
+
 A read-only JavaScript Action that reviews exact direct npm and PyPI dependency changes in pull requests. It supports Dependabot, Renovate, and ordinary contributors.
 
 The Action examines dependency manifests and lockfiles locally, selects at most three direct changes (security updates first, then major updates), and sends only the ecosystem, package name, current version, target version, and optional runtime to UpgradeLens. It never uploads repository source.
@@ -79,9 +81,9 @@ are available for agent integrations beyond GitHub pull requests.
 - Exposes `reviewed`, `blocked`, and `unavailable` outputs for downstream workflow steps.
 - Treats invalid spend limits as zero; payments require at least $0.01 remaining and can never exceed $0.03 per run.
 - Fails only for an explicit `block` result. `review_required`, `unknown`, payment unavailable, and service errors remain non-failing.
-- Does not print, persist, or send wallet keys, GitHub OIDC assertions, repository contents, or complete manifests.
+- Does not print or persist wallet keys or GitHub OIDC assertions, and never uploads repository contents or complete manifests. The short-lived OIDC assertion is sent only to UpgradeLens to verify the repository trial. Wallet keys stay in the Action process.
 
-Marketplace publication is intentionally not required. Pin the Action to a release commit SHA for the strongest supply-chain control; the moving `v0` tag tracks compatible v0 releases.
+The Action is published on [GitHub Marketplace](https://github.com/marketplace/actions/upgradelens-dependency-review). Pin the Action to a release commit SHA for the strongest supply-chain control; the moving `v0` tag tracks compatible v0 releases.
 
 ## Data handling and support
 
