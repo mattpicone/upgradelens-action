@@ -2,6 +2,8 @@
 
 [Install from GitHub Marketplace](https://github.com/marketplace/actions/upgradelens-dependency-review).
 
+The zero-setup alternative is the [UpgradeLens Review GitHub App](https://github.com/apps/upgradelens-review/installations/new) ([product page](https://upgradelens.mattpicone.workers.dev/github)). It comments on npm and PyPI upgrade pull requests after you install it, with no workflow file.
+
 A read-only JavaScript Action that reviews exact direct npm and PyPI dependency changes in pull requests. It supports Dependabot, Renovate, and ordinary contributors.
 
 The Action examines dependency manifests and lockfiles locally, selects at most three direct changes (security updates first, then major updates), and sends only the ecosystem, package name, current version, target version, and optional runtime to UpgradeLens. It never uploads repository source.
